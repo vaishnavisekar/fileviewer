@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Folder Comparison | Enterprise Tool</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+  <div class="app-container">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span>📊</span>
+          <span>Diffly</span>
+        </div>
+      </div>
+
+      <div class="sidebar-content">
+        <div class="summary-section">
+          <h4>Comparison Summary</h4>
+
+          <div class="nav-item active" id="nav-all">
+            <span>📅</span>
+            <span>All Files</span>
+            <span class="nav-badge" id="badge-all">0</span>
+          </div>
+
+          <div class="nav-item status-filter" data-status="changed" id="nav-changed">
+            <span>✏️</span>
+            <span>Changed</span>
+            <span class="nav-badge" id="badge-changed">0</span>
+          </div>
+
+          <div class="nav-item status-filter" data-status="added" id="nav-added">
+            <span>➕</span>
+            <span>Added</span>
+            <span class="nav-badge" id="badge-added">0</span>
+          </div>
+
+          <div class="nav-item status-filter" data-status="removed" id="nav-removed">
+            <span>🗑️</span>
+            <span>Removed</span>
+            <span class="nav-badge" id="badge-removed">0</span>
+          </div>
+
+          <div class="nav-item status-filter" data-status="unchanged" id="nav-unchanged">
+            <span>✓</span>
+            <span>Unchanged</span>
+            <span class="nav-badge" id="badge-unchanged">0</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <main class="main-content">
+      <header class="top-bar">
+        <h2 class="page-title">Workspace Index</h2>
+        <div class="top-actions">
+          <!-- Placeholder for potential future tools -->
+        </div>
+      </header>
+
+      <div class="content-body">
+        <!-- Folder Selection -->
+        <div class="folder-selector-grid">
+          <!-- Source Folder -->
+          <div class="upload-card">
+            <div class="upload-header">
+              <span class="folder-label">Source Directory</span>
+              <label for="upload-left" class="btn-upload">
+                Select Folder
+                <input type="file" id="upload-left" webkitdirectory directory multiple hidden>
+              </label>
+            </div>
+            <div class="folder-current">
+              <div class="folder-avatar">📁</div>
+              <div class="folder-info">
+                <div class="folder-title" id="left-folder-name">Source Folder</div>
+                <div class="folder-meta" id="left-folder-size">0 MB total</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Target Folder -->
+          <div class="upload-card">
+            <div class="upload-header">
+              <span class="folder-label">Target Directory</span>
+              <label for="upload-right" class="btn-upload">
+                Select Folder
+                <input type="file" id="upload-right" webkitdirectory directory multiple hidden>
+              </label>
+            </div>
+            <div class="folder-current">
+              <div class="folder-avatar">📁</div>
+              <div class="folder-info">
+                <div class="folder-title" id="right-folder-name">Target Folder</div>
+                <div class="folder-meta" id="right-folder-size">0 MB total</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- File List Workspace -->
+        <div class="file-list-card">
+          <div class="file-list-header">
+            <div class="col-header">Source File System</div>
+            <div class="col-header">Target File System</div>
+          </div>
+          <div class="file-list" id="file-list">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Unified Diff Modal -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title-box">
+          <span id="modal-file-icon" style="font-size: 1.5rem;">📄</span>
+          <h3 class="modal-title" id="modal-title">filename.js</h3>
+          <span class="status-capsule" id="modal-status">Changed</span>
+          <div class="toggle-container" id="modal-diff-toggle-container">
+            <label class="switch">
+              <input type="checkbox" id="modal-diff-toggle">
+              <span class="slider round"></span>
+            </label>
+            <span class="toggle-label">Differences Only</span>
+          </div>
+        </div>
+        <button class="modal-close" id="modal-close">✕</button>
+      </div>
+      <div class="modal-body" id="modal-body">
+        <!-- Content injected by app.js -->
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=2.8"></script>
+</body>
+
+</html>
