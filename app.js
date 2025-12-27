@@ -7,13 +7,66 @@ console.log('DICOM Comparison App v3.0 Loaded - No Synthetic Data');
 
 let globalComparisonData = null;
 let currentFilter = 'all'; // 'all', 'removed', 'added', 'changed', 'unchanged'
+const objectURLRegistry = new Set(); // Track object URLs for cleanup
 
-// Compare folders and categorize files
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+
+// Compute SHA-256 hash of file content
+async function computeFileHash(file, isText) {
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    let data = arrayBuffer;
+
+    if (isText) {
+      // Normalize line endings for consistent comparison
+      const text = new TextDecoder('utf-8').decode(arrayBuffer);
+      const normalized = text.replace(/\r\n/g, '\n');
+      data = new TextEncoder().encode(normalized);
+    }
+
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(hashBuffer))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+  } catch (e) {
+    console.error('Hash computation failed:', e);
+    return null;
+  }
+}
+
+// Track object URLs to prevent memory leaks
+function createTrackedObjectURL(blob) {
+  const url = URL.createObjectURL(blob);
+  objectURLRegistry.add(url);
+  return url;
+}
+
+// Cleanup all tracked object URLs
+function cleanupObjectURLs() {
+  objectURLRegistry.forEach(url => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.warn('Failed to revoke URL:', url);
+    }
+  });
+  objectURLRegistry.clear();
+}
+
+// Compare folders and categorize files (Optimized O(n) with Map)
 function compareFolders(sourceFolder, targetFolder) {
-  const allFileNames = new Set([
-    ...sourceFolder.files.map(f => f.name),
-    ...targetFolder.files.map(f => f.name)
-  ]);
+  if (!sourceFolder || !targetFolder) {
+    console.warn('Invalid folder data for comparison');
+    return { removed: [], added: [], changed: [], unchanged: [] };
+  }
+
+  // Build Maps for O(1) lookup instead of O(n) find
+  const sourceMap = new Map((sourceFolder.files || []).map(f => [f.name, f]));
+  const targetMap = new Map((targetFolder.files || []).map(f => [f.name, f]));
+
+  const allFileNames = new Set([...sourceMap.keys(), ...targetMap.keys()]);
 
   const comparison = {
     removed: [],
@@ -23,19 +76,25 @@ function compareFolders(sourceFolder, targetFolder) {
   };
 
   allFileNames.forEach(fileName => {
-    const sourceFile = sourceFolder.files.find(f => f.name === fileName);
-    const targetFile = targetFolder.files.find(f => f.name === fileName);
+    const sourceFile = sourceMap.get(fileName);
+    const targetFile = targetMap.get(fileName);
 
     if (sourceFile && !targetFile) {
       comparison.removed.push({ source: sourceFile, target: null, name: fileName });
     } else if (!sourceFile && targetFile) {
       comparison.added.push({ source: null, target: targetFile, name: fileName });
     } else if (sourceFile && targetFile) {
-      // Check if files are different
-      const isDifferent =
-        sourceFile.size !== targetFile.size ||
-        sourceFile.date !== targetFile.date ||
-        (sourceFile.content !== undefined && targetFile.content !== undefined && sourceFile.content !== targetFile.content);
+      // Use content hash if available, otherwise fallback to size/date
+      let isDifferent;
+      if (sourceFile.contentHash && targetFile.contentHash) {
+        isDifferent = sourceFile.contentHash !== targetFile.contentHash;
+      } else {
+        // Fallback for server mode or files without hash
+        isDifferent =
+          sourceFile.size !== targetFile.size ||
+          sourceFile.date !== targetFile.date ||
+          (sourceFile.content !== undefined && targetFile.content !== undefined && sourceFile.content !== targetFile.content);
+      }
 
       if (isDifferent) {
         comparison.changed.push({ source: sourceFile, target: targetFile, name: fileName });
@@ -102,53 +161,57 @@ async function handleUpload(event, side, folders) {
   const folderName = files[0].webkitRelativePath.split('/')[0] || (side === 'left' ? 'Uploaded Source' : 'Uploaded Target');
   let totalSize = 0;
 
-  // Create promises for file reading
-  const filePromises = files.map(file => {
-    return new Promise((resolve) => {
-      totalSize += file.size / (1024 * 1024); // Convert to MB
-      const nameParts = file.name.split('.');
-      const hasExtension = nameParts.length > 1;
-      const extension = hasExtension ? nameParts.pop().toLowerCase() : '';
-      const baseName = nameParts.join('.').toLowerCase();
+  // Create promises for file reading and hashing (fully async-safe)
+  const filePromises = files.map(async (file) => {
+    totalSize += file.size / (1024 * 1024); // Convert to MB
+    const nameParts = file.name.split('.');
+    const hasExtension = nameParts.length > 1;
+    const extension = hasExtension ? nameParts.pop().toLowerCase() : '';
+    const baseName = nameParts.join('.').toLowerCase();
 
-      // Determine type
-      let type = 'default';
-      const textExtensions = ['txt', 'md', 'json', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'py', 'java', 'c', 'cpp', 'h', 'xml', 'yaml', 'yml', 'sh', 'sql', 'env', 'gitignore', 'editorconfig', 'log', 'bat', 'ini', 'conf', 'cfg', 'properties', 'dockerfile', 'makefile'];
-      const textBaseNames = ['readme', 'license', 'dockerfile', 'makefile', 'procfile', 'gemfile', 'package', 'composer'];
+    // Determine type
+    let type = 'default';
+    const textExtensions = ['txt', 'md', 'json', 'js', 'ts', 'tsx', 'jsx', 'html', 'css', 'py', 'java', 'c', 'cpp', 'h', 'xml', 'yaml', 'yml', 'sh', 'sql', 'env', 'gitignore', 'editorconfig', 'log', 'bat', 'ini', 'conf', 'cfg', 'properties', 'dockerfile', 'makefile'];
+    const textBaseNames = ['readme', 'license', 'dockerfile', 'makefile', 'procfile', 'gemfile', 'package', 'composer'];
 
-      if (textExtensions.includes(extension) || textBaseNames.includes(baseName) || (extension === '' && textBaseNames.includes(file.name.toLowerCase()))) {
-        type = 'text';
-      } else if (['xlsx', 'xls', 'csv'].includes(extension)) {
-        type = 'spreadsheet';
-      } else if (['pdf'].includes(extension)) {
-        type = 'pdf';
-      } else if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(extension)) {
-        type = 'image';
-      } else if (['dcm', 'dicom'].includes(extension)) {
-        type = 'dicom';
+    if (textExtensions.includes(extension) || textBaseNames.includes(baseName) || (extension === '' && textBaseNames.includes(file.name.toLowerCase()))) {
+      type = 'text';
+    } else if (['xlsx', 'xls', 'csv'].includes(extension)) {
+      type = 'spreadsheet';
+    } else if (['pdf'].includes(extension)) {
+      type = 'pdf';
+    } else if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(extension)) {
+      type = 'image';
+    } else if (['dcm', 'dicom'].includes(extension)) {
+      type = 'dicom';
+    }
+
+    const fileData = {
+      name: file.name,
+      size: file.size / (1024 * 1024),
+      date: new Date(file.lastModified).toISOString().split('T')[0],
+      type: type,
+      content: '',
+      file: file // Store the actual File object
+    };
+
+    // Read text content if needed
+    if (type === 'text') {
+      try {
+        const text = await file.text();
+        fileData.content = text;
+      } catch (e) {
+        console.warn('Failed to read text file:', file.name, e);
       }
+    }
 
-      const fileData = {
-        name: file.name,
-        size: file.size / (1024 * 1024),
-        date: new Date(file.lastModified).toISOString().split('T')[0],
-        type: type,
-        content: '',
-        file: file // Store the actual File object
-      };
+    // Compute content hash for all files (async-safe)
+    const hash = await computeFileHash(file, type === 'text');
+    if (hash) {
+      fileData.contentHash = hash;
+    }
 
-      if (type === 'text') {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          fileData.content = e.target.result;
-          resolve(fileData);
-        };
-        reader.onerror = () => resolve(fileData);
-        reader.readAsText(file);
-      } else {
-        resolve(fileData);
-      }
-    });
+    return fileData;
   });
 
   const parsedFiles = await Promise.all(filePromises);
@@ -181,12 +244,17 @@ async function handleUpload(event, side, folders) {
 
 // Render summary statistics with animation
 function renderSummary(comparison) {
+  if (!comparison) {
+    console.warn('Comparison data not ready');
+    return;
+  }
+
   const counts = {
-    all: comparison.removed.length + comparison.added.length + comparison.changed.length + comparison.unchanged.length,
-    removed: comparison.removed.length,
-    added: comparison.added.length,
-    changed: comparison.changed.length,
-    unchanged: comparison.unchanged.length
+    all: (comparison.removed?.length || 0) + (comparison.added?.length || 0) + (comparison.changed?.length || 0) + (comparison.unchanged?.length || 0),
+    removed: comparison.removed?.length || 0,
+    added: comparison.added?.length || 0,
+    changed: comparison.changed?.length || 0,
+    unchanged: comparison.unchanged?.length || 0
   };
 
   // Update badges in sidebar
@@ -257,13 +325,20 @@ function animateCounter(element, start, end, duration) {
 // Render file list
 function renderFileList(comparison) {
   const fileList = document.getElementById('file-list');
+  if (!fileList) return;
+
   fileList.innerHTML = '';
 
+  if (!comparison) {
+    console.warn('Comparison data not ready');
+    return;
+  }
+
   let allFiles = [
-    ...comparison.removed.map(f => ({ ...f, status: 'removed' })),
-    ...comparison.added.map(f => ({ ...f, status: 'added' })),
-    ...comparison.changed.map(f => ({ ...f, status: 'changed' })),
-    ...comparison.unchanged.map(f => ({ ...f, status: 'unchanged' }))
+    ...(comparison.removed || []).map(f => ({ ...f, status: 'removed' })),
+    ...(comparison.added || []).map(f => ({ ...f, status: 'added' })),
+    ...(comparison.changed || []).map(f => ({ ...f, status: 'changed' })),
+    ...(comparison.unchanged || []).map(f => ({ ...f, status: 'unchanged' }))
   ].sort((a, b) => a.name.localeCompare(b.name));
 
   // Apply filter
@@ -344,7 +419,7 @@ function createFileRow(fileData) {
   row.addEventListener('click', (e) => {
     // If click was on a view button, don't open the diff
     if (e.target.closest('.btn-view')) return;
-    openFileDiff(fileData);
+    prepareAndOpenDiff(fileData);
   });
 
   return row;
@@ -357,7 +432,7 @@ function createViewButton(file, origin) {
   btn.innerHTML = 'View';
   btn.onclick = (e) => {
     e.stopPropagation();
-    openFileView(file, origin);
+    prepareAndOpenView(file, origin);
   };
   return btn;
 }
@@ -368,6 +443,11 @@ function createViewButton(file, origin) {
 
 // Open file diff modal
 function openFileDiff(fileData) {
+  if (!fileData) {
+    console.warn('Invalid file data for diff');
+    return;
+  }
+
   const { source, target, name, status } = fileData;
 
   const modal = document.getElementById('modal-overlay');
@@ -427,6 +507,9 @@ function closeModal() {
   const modal = document.getElementById('modal-overlay');
   modal.classList.add('hidden');
   document.body.style.overflow = '';
+
+  // Cleanup object URLs to prevent memory leaks
+  cleanupObjectURLs();
 }
 
 // Open single file view
@@ -474,11 +557,11 @@ async function openFileView(file, origin) {
       break;
 
     case 'image':
-      const imgSrc = file.file ? URL.createObjectURL(file.file) : '';
+      const imgSrc = file.file ? createTrackedObjectURL(file.file) : '';
       contentHtml = `
         <div class="text-diff-container single-panel">
           <div class="diff-sub-panel" style="align-items: center; justify-content: center; padding: 40px; overflow: auto;">
-            ${imgSrc ? `<img src="${imgSrc}" style="max-width: 100%; max-height: 500px; border-radius: 8px; box-shadow: var(--shadow-md);" onload="URL.revokeObjectURL(this.src)">` : '<div style="font-size: 8rem; margin-bottom: 24px;">🖼️</div>'}
+            ${(imgSrc || file.url) ? `<img src="${file.url || imgSrc}" style="max-width: 100%; max-height: 500px; border-radius: 8px; box-shadow: var(--shadow-md);" onload="${imgSrc ? 'URL.revokeObjectURL(this.src)' : ''}">` : '<div style="font-size: 8rem; margin-bottom: 24px;">🖼️</div>'}
             <h3 style="margin-top: 24px;">${file.name}</h3>
             <div class="image-metadata" style="margin-top: 24px; width: 100%; max-width: 400px;">
               <div class="metadata-row"><span>Dimensions:</span><strong>${file.width || 'Unknown'} × ${file.height || 'Unknown'}px</strong></div>
@@ -491,44 +574,18 @@ async function openFileView(file, origin) {
       break;
 
     case 'spreadsheet':
-      const mockData = [
-        { row: 1, col: 'A', value: 'Product' },
-        { row: 1, col: 'B', value: 'Price' },
-        { row: 1, col: 'C', value: 'Quantity' },
-        { row: 2, col: 'A', value: 'Widget' },
-        { row: 2, col: 'B', value: origin === 'Source' ? '$10.00' : '$12.50' },
-        { row: 2, col: 'C', value: origin === 'Source' ? '100' : '150' },
-        { row: 3, col: 'A', value: 'Gadget' },
-        { row: 3, col: 'B', value: '$25.00' },
-        { row: 3, col: 'C', value: origin === 'Source' ? '50' : '75' },
-      ];
       contentHtml = `
         <div class="spreadsheet-diff" style="max-width: 800px; margin: 0 auto;">
           <h3 style="margin-bottom: 20px; text-align: center;">Spreadsheet Data Preview</h3>
-          <table class="diff-table">
-            <thead>
-              <tr>
-                <th>Cell</th>
-                <th>${origin} Value</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${mockData.map(cell => `
-                <tr>
-                  <td><strong>${cell.col}${cell.row}</strong></td>
-                  <td>${cell.value}</td>
-                  <td>✓ Present</td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
+          <div style="padding: 2rem; text-align: center; color: var(--neutral-600);">
+            No data available.
+          </div>
         </div>
       `;
       break;
 
     case 'pdf':
-      const pdfSrc = file.file ? URL.createObjectURL(file.file) : '';
+      const pdfSrc = file.url || (file.file ? createTrackedObjectURL(file.file) : '');
       contentHtml = `
         <div class="pdf-diff" style="width: 100%; height: 100%; margin: 0 auto; display: flex; flex-direction: column;">
           <h3 style="margin-bottom: 16px; text-align: center;">PDF Document View</h3>
@@ -807,39 +864,12 @@ function createSpreadsheetDiff(source, target, status) {
   container.className = 'spreadsheet-diff';
 
   // Mock spreadsheet data
-  const mockData = [
-    { row: 1, col: 'A', source: 'Product', target: 'Product', changed: false },
-    { row: 1, col: 'B', source: 'Price', target: 'Price', changed: false },
-    { row: 1, col: 'C', source: 'Quantity', target: 'Quantity', changed: false },
-    { row: 2, col: 'A', source: 'Widget', target: 'Widget', changed: false },
-    { row: 2, col: 'B', source: '$10.00', target: '$12.50', changed: status === 'changed' },
-    { row: 2, col: 'C', source: '100', target: '150', changed: status === 'changed' },
-    { row: 3, col: 'A', source: 'Gadget', target: 'Gadget', changed: false },
-    { row: 3, col: 'B', source: '$25.00', target: '$25.00', changed: false },
-    { row: 3, col: 'C', source: '50', target: '75', changed: status === 'changed' },
-  ];
+  // Synthetic data removed
 
   container.innerHTML = `
-    <table class="diff-table">
-      <thead>
-        <tr>
-          <th>Cell</th>
-          <th>Source Value</th>
-          <th>Target Value</th>
-          <th>Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${mockData.map(cell => `
-          <tr class="${!cell.changed ? 'row-matched' : ''}">
-            <td><strong>${cell.col}${cell.row}</strong></td>
-            <td class="${cell.changed ? 'cell-changed' : ''}">${cell.source}</td>
-            <td class="${cell.changed ? 'cell-changed' : ''}">${cell.target}</td>
-            <td>${cell.changed ? '✏️ Changed' : '✓ Same'}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
+    <div style="padding: 2rem; text-align: center; color: var(--neutral-600);">
+        Spreadsheet comparison not available.
+    </div>
   `;
 
   return container;
@@ -875,15 +905,15 @@ function createImageDiff(source, target, status) {
   const container = document.createElement('div');
   container.className = 'image-diff';
 
-  const sSrc = source && source.file ? URL.createObjectURL(source.file) : null;
-  const tSrc = target && target.file ? URL.createObjectURL(target.file) : null;
+  const sSrc = (source && source.url) || (source && source.file ? createTrackedObjectURL(source.file) : null);
+  const tSrc = (target && target.url) || (target && target.file ? createTrackedObjectURL(target.file) : null);
 
   if (status === 'removed') {
     container.innerHTML = `
       <div class="image-panel">
         <h4>Source (Removed)</h4>
         <div style="background: var(--neutral-200); padding: var(--space-8); border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center;">
-          ${sSrc ? `<img src="${sSrc}" style="max-width: 100%; max-height: 300px; border-radius: 4px;" onload="URL.revokeObjectURL(this.src)">` : '<div style="font-size: 4rem;">🖼️</div>'}
+          ${sSrc ? `<img src="${sSrc}" style="max-width: 100%; max-height: 300px; border-radius: 4px;" onload="${(source && source.file) ? 'URL.revokeObjectURL(this.src)' : ''}">` : '<div style="font-size: 4rem;">🖼️</div>'}
         </div>
         <div class="image-metadata">
           <div class="metadata-row"><span>Dimensions:</span><strong>${source.width || 'N/A'} × ${source.height || 'N/A'}px</strong></div>
@@ -908,7 +938,7 @@ function createImageDiff(source, target, status) {
       <div class="image-panel">
         <h4>Target (Added)</h4>
         <div style="background: var(--neutral-200); padding: var(--space-8); border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center;">
-          ${tSrc ? `<img src="${tSrc}" style="max-width: 100%; max-height: 300px; border-radius: 4px;" onload="URL.revokeObjectURL(this.src)">` : '<div style="font-size: 4rem;">🖼️</div>'}
+          ${tSrc ? `<img src="${tSrc}" style="max-width: 100%; max-height: 300px; border-radius: 4px;" onload="${(target && target.file) ? 'URL.revokeObjectURL(this.src)' : ''}">` : '<div style="font-size: 4rem;">🖼️</div>'}
         </div>
         <div class="image-metadata">
           <div class="metadata-row"><span>Dimensions:</span><strong>${target.width || 'N/A'} × ${target.height || 'N/A'}px</strong></div>
@@ -921,7 +951,7 @@ function createImageDiff(source, target, status) {
       <div class="image-panel">
         <h4>Source</h4>
         <div style="background: var(--neutral-200); padding: var(--space-8); border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center;">
-          ${sSrc ? `<img src="${sSrc}" style="max-width: 100%; max-height: 300px; border-radius: 4px;" onload="URL.revokeObjectURL(this.src)">` : '<div style="font-size: 4rem;">🖼️</div>'}
+          ${sSrc ? `<img src="${sSrc}" style="max-width: 100%; max-height: 300px; border-radius: 4px;" onload="${(source && source.file) ? 'URL.revokeObjectURL(this.src)' : ''}">` : '<div style="font-size: 4rem;">🖼️</div>'}
         </div>
         <div class="image-metadata">
           <div class="metadata-row ${source.width === target.width && source.height === target.height ? 'row-matched' : ''}"><span>Dimensions:</span><strong>${source.width || 'N/A'} × ${source.height || 'N/A'}px</strong></div>
@@ -931,7 +961,7 @@ function createImageDiff(source, target, status) {
       <div class="image-panel">
         <h4>Target</h4>
         <div style="background: var(--neutral-200); padding: var(--space-8); border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center;">
-          ${tSrc ? `<img src="${tSrc}" style="max-width: 100%; max-height: 300px; border-radius: 4px;" onload="URL.revokeObjectURL(this.src)">` : '<div style="font-size: 4rem;">🖼️</div>'}
+          ${tSrc ? `<img src="${tSrc}" style="max-width: 100%; max-height: 300px; border-radius: 4px;" onload="${(target && target.file) ? 'URL.revokeObjectURL(this.src)' : ''}">` : '<div style="font-size: 4rem;">🖼️</div>'}
         </div>
         <div class="image-metadata">
           <div class="metadata-row ${source.width === target.width && source.height === target.height ? 'row-matched' : ''}"><span>Dimensions:</span><strong>${target.width || 'N/A'} × ${target.height || 'N/A'}px</strong></div>
@@ -1075,12 +1105,12 @@ function createDicomDiff(source, target, status) {
     }[key] || '(????,????)');
 
     const tbody = table.querySelector('tbody');
-    
+
     if (allTagKeys.length === 0) {
       tbody.innerHTML = '<tr><td colspan="5" style="padding: 20px; text-align: center; color: var(--text-muted);">No metadata available</td></tr>';
       return;
     }
-    
+
     tbody.innerHTML = allTagKeys.map(key => {
       const sExists = sMeta && sMeta.hasOwnProperty(key);
       const tExists = tMeta && tMeta.hasOwnProperty(key);
@@ -1137,7 +1167,7 @@ function createDicomDiff(source, target, status) {
         // Set canvas dimensions
         sCanvas.width = 240;
         sCanvas.height = 240;
-        
+
         parseDicomPixelData(source.file).then(pixelInfo => {
           if (pixelInfo) {
             renderDicomToCanvas(sCanvas, pixelInfo);
@@ -1149,19 +1179,19 @@ function createDicomDiff(source, target, status) {
             ctx.fillStyle = 'white';
             ctx.font = '12px Arial';
             ctx.textAlign = 'center';
-            ctx.fillText('No Pixel Data', sCanvas.width/2, sCanvas.height/2);
+            ctx.fillText('No Pixel Data', sCanvas.width / 2, sCanvas.height / 2);
           }
         });
       }
     }
-    
+
     if (target?.file) {
       const tCanvas = document.getElementById(tCanvasId);
       if (tCanvas) {
         // Set canvas dimensions
         tCanvas.width = 240;
         tCanvas.height = 240;
-        
+
         parseDicomPixelData(target.file).then(pixelInfo => {
           if (pixelInfo) {
             renderDicomToCanvas(tCanvas, pixelInfo);
@@ -1173,7 +1203,7 @@ function createDicomDiff(source, target, status) {
             ctx.fillStyle = 'white';
             ctx.font = '12px Arial';
             ctx.textAlign = 'center';
-            ctx.fillText('No Pixel Data', tCanvas.width/2, tCanvas.height/2);
+            ctx.fillText('No Pixel Data', tCanvas.width / 2, tCanvas.height / 2);
           }
         });
       }
@@ -1508,13 +1538,91 @@ function initializeApp() {
     }
   });
 
-  console.log('✅ DICOM Comparison App initialized - No Synthetic Data');
-  console.log('📊 Comparison stats:', {
-    removed: comparison.removed.length,
-    added: comparison.added.length,
-    changed: comparison.changed.length,
-    unchanged: comparison.unchanged.length
-  });
+  // Check if running in server mode
+  checkServerMode(folders);
+}
+
+// Check if data is available from server
+async function checkServerMode(folders) {
+  try {
+    const response = await fetch('/api/comparison');
+    if (response.ok) {
+      const data = await response.json();
+      console.log('📦 Server mode detected. Loading data...', data);
+
+      // Map server data to app structure
+      folders.sourceFolder = {
+        ...data.source,
+        files: data.source.files.map(f => ({ ...f, origin: 'source' }))
+      };
+      folders.targetFolder = {
+        ...data.target,
+        files: data.target.files.map(f => ({ ...f, origin: 'target' }))
+      };
+
+      // Refresh comparison
+      const comparison = compareFolders(folders.sourceFolder, folders.targetFolder);
+      globalComparisonData = comparison;
+
+      renderFolderInfo(folders);
+      renderSummary(comparison);
+      renderFileList(comparison);
+
+      // Hide uploaders or show connected status
+      document.querySelectorAll('.upload-area').forEach(el => {
+        el.innerHTML = '<div style="color: var(--success); font-weight: 500;">✓ Connected to Server</div>';
+        el.style.padding = '1rem';
+      });
+
+    }
+  } catch (e) {
+    console.log('Running in standalone mode (no server API)');
+  }
+}
+
+// Fetch file content if missing
+async function ensureFileContent(file, origin) {
+  if (file.content !== undefined && file.content !== '') return;
+  if (!file.origin && !origin) return; // Local file without content?
+
+  const side = (file.origin || origin).toLowerCase().includes('source') ? 'source' : 'target';
+  const url = `/files/${side}/${encodeURIComponent(file.relativePath || file.name)}`;
+
+  try {
+    if (file.type === 'text') {
+      const res = await fetch(url);
+      if (res.ok) file.content = await res.text();
+    } else if (file.type === 'image' || file.type === 'pdf') {
+      // For binary files, we might just use the URL
+      file.url = url;
+    } else if (file.type === 'dicom') {
+      const res = await fetch(url);
+      if (res.ok) file.file = await res.blob(); // Convert to blob for parsing
+    }
+  } catch (e) {
+    console.error('Failed to fetch file content', e);
+  }
+}
+
+// Wrap open actions to ensure content
+async function prepareAndOpenDiff(fileData) {
+  const { source, target } = fileData;
+  const promises = [];
+  if (source) promises.push(ensureFileContent(source, 'source'));
+  if (target) promises.push(ensureFileContent(target, 'target'));
+
+  document.body.style.cursor = 'wait';
+  await Promise.all(promises);
+  document.body.style.cursor = 'default';
+
+  openFileDiff(fileData);
+}
+
+async function prepareAndOpenView(file, origin) {
+  document.body.style.cursor = 'wait';
+  await ensureFileContent(file, origin);
+  document.body.style.cursor = 'default';
+  openFileView(file, origin);
 }
 
 // Initialize when DOM is ready
